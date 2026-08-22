@@ -33,6 +33,14 @@ The script may print long differential-evolution values as convergence evidence 
 
 For the current run, the sampled mean nearest-point Manhattan/L1 convergence score is `1.7043183383e-03`; the score for the final reported parameters is `1.7044074408e-03`. Both values use 12,000 curve samples and are not continuous-curve accuracy claims.
 
+## Final Answer (LaTeX / Desmos)
+
+This is the copyable Desmos parametric expression for `6 <= t <= 60`, submitted per the assignment's required Submission Format of writing or copying the equation in LaTeX format in the README.
+
+```text
+\left(t*\cos(0.5236)-e^{0.03\left|t\right|}\cdot\sin(0.3t)\sin(0.5236)+55,42+t*\sin(0.5236)+e^{0.03\left|t\right|}\cdot\sin(0.3t)\cos(0.5236)\right)
+```
+
 ## Curve comparison
 
 ![Fitted curve compared with supplied data](results/curve_fit.png)
