@@ -11,11 +11,15 @@ y = 42 + t*sin(theta) + exp(M*abs(t))*sin(0.3*t)*cos(theta)
 
 The valid ranges are `6 < t < 60`, `0 < theta < 50 degrees`, `-0.05 < M < 0.05`, and `0 < X < 100`. The program receives `theta` in degrees and converts it to radians before evaluating the curve.
 
+The original assignment brief is included at `data/R&D assignment pdf.pdf` for reference.
+
 ## Method
 
 The CSV order is arbitrary, so a row cannot be paired directly with an evenly sampled value of `t`. Each point has its own unknown `t`, unrelated to its row number.
 
 For each trial parameter set, the script samples the curve at 12,000 `t` values, builds a KD-tree for those samples, and finds the nearest curve point for every supplied point. The fitting objective is the mean nearest-point **Manhattan/L1 distance**: `|dx| + |dy|`. SciPy differential evolution uses this objective to locate the parameter region globally.
+
+The CSV provides no per-row `t` value, so each point's true position on the curve is unknown. Nearest-point distance therefore scores how well a candidate `(theta, M, X)` explains the observed point cloud without assuming row order or correspondence. The later per-point `t`-inversion validation independently cross-checks this correspondence-free search, confirming that it did not converge on a coincidentally close but incorrect parameter set.
 
 That KD-tree Manhattan/L1 value depends on the density of the 12,000-point sampled curve, so it is useful as a search objective and convergence indicator, not as the final accuracy claim.
 
