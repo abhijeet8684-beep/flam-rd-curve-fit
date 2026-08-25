@@ -51,11 +51,18 @@ This is the copyable Desmos parametric expression for `6 <= t <= 60`, submitted 
 
 The blue points are the supplied data and the orange curve uses the final fitted parameters.
 
+### Desmos curve
+
+![Desmos parametric curve](Sceenshot/Dasmos%20Curve.png)
+
+[Open the interactive Desmos graph](https://www.desmos.com/calculator/evnyyb7znw).
+
 ## Run in VS Code
 
 Open this folder in VS Code, then run these commands in the integrated PowerShell terminal:
 
 ```powershell
+
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
