@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.optimize import differential_evolution, minimize_scalar
+from scipy.optimize import differential_evolution, least_squares, minimize_scalar
 from scipy.spatial import cKDTree
 
 
@@ -42,54 +42,114 @@ def curve_points(theta_degrees: float, m: float, x_offset: float, n: int = N_CUR
     return curve_at_t(t, theta_degrees, m, x_offset)
 
 
-def mean_nearest_point_manhattan_distance(parameters: np.ndarray, data: np.ndarray) -> float:
-    """Mean nearest-point Manhattan/L1 distance, |dx| + |dy|, to a candidate curve."""
-    candidate_curve = curve_points(*parameters)
-    distances, _ = cKDTree(candidate_curve).query(data, p=1, workers=-1)
-    return float(np.mean(np.abs(distances)))
+def recover_t_and_residuals(parameters: np.ndarray | tuple[float, float, float], data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Algebraically decouple the 2D rotation and translation to recover t and orthogonal residuals.
+
+    Given:
+        [x - X ]   [ cos(theta) -sin(theta)] [       t      ]
+        [y - 42] = [ sin(theta)  cos(theta)] [ exp(M|t|)*sin(0.3t) ]
+
+    Inverting the rotation matrix yields:
+        u_i =  (x_i - X)*cos(theta) + (y_i - 42)*sin(theta)  = t_i
+        v_i = -(x_i - X)*sin(theta) + (y_i - 42)*cos(theta)  = exp(M|t_i|)*sin(0.3*t_i)
+    """
+    theta_deg, m, x_offset = parameters
+    theta = np.deg2rad(theta_deg)
+    cos_theta, sin_theta = np.cos(theta), np.sin(theta)
+
+    dx = data[:, 0] - x_offset
+    dy = data[:, 1] - 42.0
+
+    u = dx * cos_theta + dy * sin_theta
+    v = -dx * sin_theta + dy * cos_theta
+    v_pred = np.exp(m * np.abs(u)) * np.sin(0.3 * u)
+    residuals = v - v_pred
+    return u, residuals
+
+
+def closed_form_l1_loss(parameters: np.ndarray, data: np.ndarray) -> float:
+    """Mean L1 residual between actual and predicted transverse coordinate."""
+    _, residuals = recover_t_and_residuals(parameters, data)
+    return float(np.mean(np.abs(residuals)))
 
 
 def fit_parameters(data: np.ndarray) -> tuple[np.ndarray, float]:
-    """Use a global differential-evolution search over the supplied bounds."""
-    result = differential_evolution(
-        mean_nearest_point_manhattan_distance,
+    """Find parameters using closed-form rotation decoupling + differential evolution + least-squares polish."""
+    de_result = differential_evolution(
+        closed_form_l1_loss,
         bounds=BOUNDS,
         args=(data,),
         seed=2026,
         popsize=15,
-        maxiter=250,
-        tol=1e-8,
-        polish=True,
+        maxiter=300,
+        tol=1e-10,
         updating="immediate",
         workers=1,
     )
-    return result.x, float(result.fun)
+
+    lower_bounds = [b[0] for b in BOUNDS]
+    upper_bounds = [b[1] for b in BOUNDS]
+
+    def residual_func(p: np.ndarray) -> np.ndarray:
+        return recover_t_and_residuals(p, data)[1]
+
+    ls_result = least_squares(
+        residual_func,
+        x0=de_result.x,
+        bounds=(lower_bounds, upper_bounds),
+        ftol=1e-15,
+        xtol=1e-15,
+        gtol=1e-15,
+    )
+
+    final_loss = float(np.mean(np.abs(ls_result.fun)))
+    return ls_result.x, final_loss
 
 
-def validate_t_inversion(data: np.ndarray) -> tuple[float, float]:
-    """Invert t for every point using verified parameters and report reconstruction distances."""
-    coarse_t = np.linspace(T_MIN, T_MAX, 6_001)
-    coarse_curve = curve_at_t(coarse_t, *VERIFIED_PARAMETERS)
-    step = coarse_t[1] - coarse_t[0]
-    reconstruction_distances = []
+def validate_per_point_inversion(
+    data: np.ndarray, parameters: tuple[float, float, float] = VERIFIED_PARAMETERS
+) -> dict[str, float]:
+    """Perform independent continuous t-inversion validation for all points and report full error statistics."""
+    u_recovered, transverse_residuals = recover_t_and_residuals(parameters, data)
+    euclidean_distances = []
+    l1_distances = []
 
-    for point in data:
-        coarse_distances = np.linalg.norm(coarse_curve - point, axis=1)
-        best_index = int(np.argmin(coarse_distances))
-        lower = max(T_MIN, coarse_t[best_index] - step)
-        upper = min(T_MAX, coarse_t[best_index] + step)
+    for point, u_est in zip(data, u_recovered):
+        lower = max(T_MIN, float(u_est) - 0.5)
+        upper = min(T_MAX, float(u_est) + 0.5)
 
-        def distance_at_t(t: float) -> float:
-            return float(np.linalg.norm(curve_at_t(t, *VERIFIED_PARAMETERS)[0] - point))
+        def dist_euclidean(t: float) -> float:
+            p = curve_at_t(t, *parameters)[0]
+            return float(np.linalg.norm(p - point))
 
-        local_result = minimize_scalar(distance_at_t, bounds=(lower, upper), method="bounded")
-        reconstruction_distances.append(local_result.fun)
+        def dist_l1(t: float) -> float:
+            p = curve_at_t(t, *parameters)[0]
+            return float(np.sum(np.abs(p - point)))
 
-    distances = np.asarray(reconstruction_distances)
-    return float(np.mean(distances)), float(np.max(distances))
+        e_res = minimize_scalar(dist_euclidean, bounds=(lower, upper), method="bounded")
+        l_res = minimize_scalar(dist_l1, bounds=(lower, upper), method="bounded")
+
+        euclidean_distances.append(e_res.fun)
+        l1_distances.append(l_res.fun)
+
+    e_arr = np.asarray(euclidean_distances)
+    l1_arr = np.asarray(l1_distances)
+    t_arr = np.abs(transverse_residuals)
+
+    return {
+        "euclidean_mean": float(np.mean(e_arr)),
+        "euclidean_p95": float(np.percentile(e_arr, 95)),
+        "euclidean_max": float(np.max(e_arr)),
+        "l1_mean": float(np.mean(l1_arr)),
+        "l1_p95": float(np.percentile(l1_arr, 95)),
+        "l1_max": float(np.max(l1_arr)),
+        "transverse_mean": float(np.mean(t_arr)),
+        "transverse_p95": float(np.percentile(t_arr, 95)),
+        "transverse_max": float(np.max(t_arr)),
+    }
 
 
-def save_plot(data: np.ndarray, final_parameters: np.ndarray) -> None:
+def save_plot(data: np.ndarray, final_parameters: np.ndarray | tuple[float, float, float]) -> None:
     """Create a comparison of the source data and final reported curve."""
     fitted_curve = curve_points(*final_parameters)
     theta, m, x_offset = final_parameters
@@ -115,27 +175,35 @@ def main() -> None:
     if data.ndim != 2 or data.shape[1] != 2:
         raise ValueError(f"Expected two CSV columns (x, y), got shape {data.shape}.")
 
-    fitted_parameters, fitted_manhattan_distance = fit_parameters(data)
-    verified_manhattan_distance = mean_nearest_point_manhattan_distance(np.asarray(VERIFIED_PARAMETERS), data)
-    validation_mean, validation_maximum = validate_t_inversion(data)
+    fitted_parameters, fitted_loss = fit_parameters(data)
+    metrics = validate_per_point_inversion(data, VERIFIED_PARAMETERS)
 
-    print("Differential-evolution convergence evidence")
+    print("Differential-evolution & least-squares convergence evidence")
     print(f"  theta = {fitted_parameters[0]:.10f} degrees")
     print(f"  M     = {fitted_parameters[1]:.10f}")
     print(f"  X     = {fitted_parameters[2]:.10f}")
-    print(f"  mean nearest-point Manhattan/L1 distance ({N_CURVE_SAMPLES:,} curve samples) = {fitted_manhattan_distance:.10e}")
+    print(f"  closed-form mean L1 residual = {fitted_loss:.10e}")
     print()
     print("Final reported parameters (independently verified)")
     print("  theta = 30 degrees")
     print("  M     = 0.03")
     print("  X     = 55")
-    print(f"  mean nearest-point Manhattan/L1 distance ({N_CURVE_SAMPLES:,} curve samples) = {verified_manhattan_distance:.10e}")
     print()
-    print("Post-fit validation: per-point t inversion using verified parameters")
-    print(f"  mean Euclidean reconstruction distance = {validation_mean:.10e}")
-    print(f"  maximum Euclidean reconstruction distance = {validation_maximum:.10e}")
+    print("Validation metrics (continuous curve reconstruction for all 1,500 points):")
+    print("  Euclidean distance:")
+    print(f"    Mean:           {metrics['euclidean_mean']:.10e}")
+    print(f"    95th percentile:{metrics['euclidean_p95']:.10e}")
+    print(f"    Max:            {metrics['euclidean_max']:.10e}")
+    print("  Manhattan / L1 distance:")
+    print(f"    Mean:           {metrics['l1_mean']:.10e}")
+    print(f"    95th percentile:{metrics['l1_p95']:.10e}")
+    print(f"    Max:            {metrics['l1_max']:.10e}")
+    print("  Closed-form transverse residual (|v - v_pred|):")
+    print(f"    Mean:           {metrics['transverse_mean']:.10e}")
+    print(f"    95th percentile:{metrics['transverse_p95']:.10e}")
+    print(f"    Max:            {metrics['transverse_max']:.10e}")
 
-    save_plot(data, np.asarray(VERIFIED_PARAMETERS))
+    save_plot(data, VERIFIED_PARAMETERS)
     print(f"\nSaved plot: {PLOT_PATH}")
 
 
