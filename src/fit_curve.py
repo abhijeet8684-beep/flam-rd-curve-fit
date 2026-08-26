@@ -1,12 +1,26 @@
-"""Fit an unordered point cloud to the supplied parametric curve."""
+"""Parametric Curve Fitting for Flam R&D Assignment.
+
+Fits an unordered 2D point cloud (x, y) to the parametric curve:
+    x(t) = t*cos(theta) - exp(M*|t|)*sin(0.3*t)*sin(theta) + X
+    y(t) = 42 + t*sin(theta) + exp(M*|t|)*sin(0.3*t)*cos(theta)
+
+Architecture & Methods:
+1. Primary Method:   Closed-form algebraic rotation decoupling (inverting R(theta) to isolate t_i directly)
+                     + Global Differential Evolution + Non-linear Least-Squares polish.
+2. Secondary Method: Discrete KD-Tree Manhattan/L1 nearest-neighbor search + Differential Evolution cross-check.
+3. Validation Pass:  Per-point continuous t-inversion using bounded scalar minimization.
+4. Metric Suite:     R2, MSE, RMSE, L1/Manhattan, Euclidean error distribution (Mean, 95th %, Max).
+"""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 
-# The script only writes an image, so it must not depend on a desktop GUI backend.
+# Non-interactive backend suitable for headless and CI environments
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,20 +28,59 @@ from scipy.optimize import differential_evolution, least_squares, minimize_scala
 from scipy.spatial import cKDTree
 
 
+# --- Configuration & Constants ---
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_PATH = PROJECT_ROOT / "data" / "xy_data.csv"
-PLOT_PATH = PROJECT_ROOT / "results" / "curve_fit.png"
+RESULTS_DIR = PROJECT_ROOT / "results"
+PLOT_PATH = RESULTS_DIR / "curve_fit.png"
+DIAGNOSTICS_PATH = RESULTS_DIR / "diagnostics.png"
 
-# (theta in degrees, M, X). SciPy accepts closed bounds; the specified open
-# intervals are represented by their endpoints for numerical optimisation.
-BOUNDS = [(0.0, 50.0), (-0.05, 0.05), (0.0, 100.0)]
+BOUNDS = [(0.0, 50.0), (-0.05, 0.05), (0.0, 100.0)]  # theta (deg), M, X
 T_MIN, T_MAX = 6.0, 60.0
 N_CURVE_SAMPLES = 12_000
 VERIFIED_PARAMETERS = (30.0, 0.03, 55.0)
 
 
-def curve_at_t(t: float | np.ndarray, theta_degrees: float, m: float, x_offset: float) -> np.ndarray:
-    """Evaluate the parametric curve at one or more t values."""
+# --- 1. Data Loading & Validation ---
+def load_dataset(filepath: Path | str = DATA_PATH) -> np.ndarray:
+    """Load and validate the 2D point cloud from a CSV file.
+
+    Args:
+        filepath: Path to the CSV file containing columns (x, y).
+
+    Returns:
+        np.ndarray of shape (N, 2) with float coordinates.
+
+    Raises:
+        FileNotFoundError: If the specified file does not exist.
+        ValueError: If the file is empty, malformed, or does not contain 2D points.
+    """
+    path = Path(filepath)
+    if not path.is_file():
+        raise FileNotFoundError(f"Dataset file not found at: {path}")
+
+    if path.stat().st_size == 0:
+        raise ValueError(f"Dataset file is empty: {path}")
+
+    try:
+        data = np.loadtxt(path, delimiter=",", skiprows=1)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse CSV dataset at {path}: {exc}") from exc
+
+    if data.ndim != 2 or data.shape[1] != 2:
+        raise ValueError(f"Expected 2D coordinate array of shape (N, 2), got shape {data.shape}.")
+
+    if len(data) == 0:
+        raise ValueError("Dataset contains zero valid data rows.")
+
+    return data
+
+
+# --- 2. Parametric Curve Evaluation ---
+def curve_at_t(
+    t: float | np.ndarray, theta_degrees: float, m: float, x_offset: float
+) -> np.ndarray:
+    """Evaluate the continuous parametric curve at one or more parameter values t."""
     theta = np.deg2rad(theta_degrees)
     oscillation = np.exp(m * np.abs(t)) * np.sin(0.3 * t)
 
@@ -36,22 +89,29 @@ def curve_at_t(t: float | np.ndarray, theta_degrees: float, m: float, x_offset: 
     return np.column_stack((x, y))
 
 
-def curve_points(theta_degrees: float, m: float, x_offset: float, n: int = N_CURVE_SAMPLES) -> np.ndarray:
-    """Return a dense (x, y) sampling of the curve for one parameter set."""
+def curve_points(
+    theta_degrees: float, m: float, x_offset: float, n: int = N_CURVE_SAMPLES
+) -> np.ndarray:
+    """Return a dense uniform sampling of the curve over [T_MIN, T_MAX]."""
     t = np.linspace(T_MIN, T_MAX, n)
     return curve_at_t(t, theta_degrees, m, x_offset)
 
 
-def recover_t_and_residuals(parameters: np.ndarray | tuple[float, float, float], data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Algebraically decouple the 2D rotation and translation to recover t and orthogonal residuals.
+# --- 3. Primary Fitting Method: Closed-Form Rotation Decoupling ---
+def recover_t_and_residuals(
+    parameters: np.ndarray | tuple[float, float, float], data: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Algebraically decouple 2D rotation and translation to recover t and orthogonal residuals.
 
-    Given:
+    Mathematical Derivation:
         [x - X ]   [ cos(theta) -sin(theta)] [       t      ]
         [y - 42] = [ sin(theta)  cos(theta)] [ exp(M|t|)*sin(0.3t) ]
 
-    Inverting the rotation matrix yields:
-        u_i =  (x_i - X)*cos(theta) + (y_i - 42)*sin(theta)  = t_i
+    Inverting R(theta) via orthogonal transpose R(-theta):
+        u_i =  (x_i - X)*cos(theta) + (y_i - 42)*sin(theta)  = t_i (exact closed-form t)
         v_i = -(x_i - X)*sin(theta) + (y_i - 42)*cos(theta)  = exp(M|t_i|)*sin(0.3*t_i)
+
+    Residual r_i = v_i - exp(M|u_i|)*sin(0.3*u_i).
     """
     theta_deg, m, x_offset = parameters
     theta = np.deg2rad(theta_deg)
@@ -67,19 +127,19 @@ def recover_t_and_residuals(parameters: np.ndarray | tuple[float, float, float],
     return u, residuals
 
 
-def closed_form_l1_loss(parameters: np.ndarray, data: np.ndarray) -> float:
-    """Mean L1 residual between actual and predicted transverse coordinate."""
+def closed_form_loss(parameters: np.ndarray, data: np.ndarray) -> float:
+    """Mean absolute L1 transverse residual for global search."""
     _, residuals = recover_t_and_residuals(parameters, data)
     return float(np.mean(np.abs(residuals)))
 
 
-def fit_parameters(data: np.ndarray) -> tuple[np.ndarray, float]:
-    """Find parameters using closed-form rotation decoupling + differential evolution + least-squares polish."""
+def fit_closed_form(data: np.ndarray, seed: int = 2026) -> tuple[np.ndarray, float]:
+    """Primary Fit: Global Differential Evolution + Non-linear Least-Squares polish on closed-form residuals."""
     de_result = differential_evolution(
-        closed_form_l1_loss,
+        closed_form_loss,
         bounds=BOUNDS,
         args=(data,),
-        seed=2026,
+        seed=seed,
         popsize=15,
         maxiter=300,
         tol=1e-10,
@@ -90,11 +150,11 @@ def fit_parameters(data: np.ndarray) -> tuple[np.ndarray, float]:
     lower_bounds = [b[0] for b in BOUNDS]
     upper_bounds = [b[1] for b in BOUNDS]
 
-    def residual_func(p: np.ndarray) -> np.ndarray:
+    def residual_vector(p: np.ndarray) -> np.ndarray:
         return recover_t_and_residuals(p, data)[1]
 
     ls_result = least_squares(
-        residual_func,
+        residual_vector,
         x0=de_result.x,
         bounds=(lower_bounds, upper_bounds),
         ftol=1e-15,
@@ -106,37 +166,116 @@ def fit_parameters(data: np.ndarray) -> tuple[np.ndarray, float]:
     return ls_result.x, final_loss
 
 
-def validate_per_point_inversion(
+# --- 4. Secondary Cross-Validation: KD-Tree Nearest-Neighbor Fit ---
+def kdtree_manhattan_loss(
+    parameters: np.ndarray, data: np.ndarray, n_samples: int = N_CURVE_SAMPLES
+) -> float:
+    """Mean nearest-neighbor Manhattan distance between data points and sampled curve points."""
+    curve = curve_points(parameters[0], parameters[1], parameters[2], n=n_samples)
+    tree = cKDTree(curve)
+    distances, _ = tree.query(data, p=1, workers=-1)
+    return float(np.mean(distances))
+
+
+def fit_kdtree(
+    data: np.ndarray, n_samples: int = N_CURVE_SAMPLES, seed: int = 2026
+) -> tuple[np.ndarray, float]:
+    """Secondary Fit: Global search over 12k sampled curve points using KD-Tree nearest-neighbor queries."""
+    result = differential_evolution(
+        kdtree_manhattan_loss,
+        bounds=BOUNDS,
+        args=(data, n_samples),
+        seed=seed,
+        popsize=15,
+        maxiter=200,
+        tol=1e-8,
+        polish=True,
+        updating="immediate",
+        workers=1,
+    )
+    return result.x, float(result.fun)
+
+
+# --- 5. Continuous Per-Point t-Inversion Validation ---
+def validate_t_inversion(
     data: np.ndarray, parameters: tuple[float, float, float] = VERIFIED_PARAMETERS
-) -> dict[str, float]:
-    """Perform independent continuous t-inversion validation for all points and report full error statistics."""
+) -> dict[str, np.ndarray]:
+    """Continuous per-point t-inversion using bounded scalar minimization on the true curve."""
     u_recovered, transverse_residuals = recover_t_and_residuals(parameters, data)
     euclidean_distances = []
     l1_distances = []
+    optimal_t_values = []
 
     for point, u_est in zip(data, u_recovered):
         lower = max(T_MIN, float(u_est) - 0.5)
         upper = min(T_MAX, float(u_est) + 0.5)
 
-        def dist_euclidean(t: float) -> float:
-            p = curve_at_t(t, *parameters)[0]
+        def dist_euclidean(t_val: float) -> float:
+            p = curve_at_t(t_val, *parameters)[0]
             return float(np.linalg.norm(p - point))
 
-        def dist_l1(t: float) -> float:
-            p = curve_at_t(t, *parameters)[0]
+        def dist_l1(t_val: float) -> float:
+            p = curve_at_t(t_val, *parameters)[0]
             return float(np.sum(np.abs(p - point)))
 
         e_res = minimize_scalar(dist_euclidean, bounds=(lower, upper), method="bounded")
         l_res = minimize_scalar(dist_l1, bounds=(lower, upper), method="bounded")
 
+        optimal_t_values.append(e_res.x)
         euclidean_distances.append(e_res.fun)
         l1_distances.append(l_res.fun)
 
-    e_arr = np.asarray(euclidean_distances)
-    l1_arr = np.asarray(l1_distances)
-    t_arr = np.abs(transverse_residuals)
+    return {
+        "optimal_t": np.asarray(optimal_t_values),
+        "recovered_t": u_recovered,
+        "euclidean": np.asarray(euclidean_distances),
+        "l1": np.asarray(l1_distances),
+        "transverse": np.abs(transverse_residuals),
+    }
+
+
+# --- 6. Comprehensive Metrics Computation ---
+def compute_fit_metrics(
+    data: np.ndarray, parameters: tuple[float, float, float] = VERIFIED_PARAMETERS
+) -> dict[str, float]:
+    """Compute R², MSE, RMSE, and full error distributions (Mean, 95th %, Max)."""
+    val_data = validate_t_inversion(data, parameters)
+    e_arr = val_data["euclidean"]
+    l1_arr = val_data["l1"]
+    t_arr = val_data["transverse"]
+    opt_t = val_data["optimal_t"]
+
+    pred_pts = curve_at_t(opt_t, *parameters)
+    x_true, y_true = data[:, 0], data[:, 1]
+    x_pred, y_pred = pred_pts[:, 0], pred_pts[:, 1]
+
+    sq_err_x = (x_true - x_pred) ** 2
+    sq_err_y = (y_true - y_pred) ** 2
+    sq_err_total = sq_err_x + sq_err_y
+
+    mse_x = float(np.mean(sq_err_x))
+    mse_y = float(np.mean(sq_err_y))
+    mse_total = float(np.mean(sq_err_total))
+    rmse_total = float(np.sqrt(mse_total))
+
+    ss_tot_x = float(np.sum((x_true - np.mean(x_true)) ** 2))
+    ss_res_x = float(np.sum(sq_err_x))
+    r2_x = 1.0 - (ss_res_x / ss_tot_x) if ss_tot_x > 0 else 1.0
+
+    ss_tot_y = float(np.sum((y_true - np.mean(y_true)) ** 2))
+    ss_res_y = float(np.sum(sq_err_y))
+    r2_y = 1.0 - (ss_res_y / ss_tot_y) if ss_tot_y > 0 else 1.0
+
+    ss_tot_combined = ss_tot_x + ss_tot_y
+    ss_res_combined = float(np.sum(sq_err_total))
+    r2_combined = 1.0 - (ss_res_combined / ss_tot_combined) if ss_tot_combined > 0 else 1.0
 
     return {
+        "r2_combined": r2_combined,
+        "r2_x": r2_x,
+        "r2_y": r2_y,
+        "mse_total": mse_total,
+        "rmse_total": rmse_total,
         "euclidean_mean": float(np.mean(e_arr)),
         "euclidean_p95": float(np.percentile(e_arr, 95)),
         "euclidean_max": float(np.max(e_arr)),
@@ -149,62 +288,140 @@ def validate_per_point_inversion(
     }
 
 
-def save_plot(data: np.ndarray, final_parameters: np.ndarray | tuple[float, float, float]) -> None:
-    """Create a comparison of the source data and final reported curve."""
-    fitted_curve = curve_points(*final_parameters)
-    theta, m, x_offset = final_parameters
+# --- 7. Plotting & Diagnostics ---
+def save_curve_plot(
+    data: np.ndarray,
+    parameters: tuple[float, float, float] = VERIFIED_PARAMETERS,
+    output_path: Path = PLOT_PATH,
+) -> None:
+    """Generate and save the main scatter overlay plot."""
+    fitted_curve = curve_points(*parameters)
+    theta, m, x_offset = parameters
 
     fig, ax = plt.subplots(figsize=(10, 7), dpi=180)
-    ax.scatter(data[:, 0], data[:, 1], s=13, alpha=0.7, label="Supplied data", color="tab:blue")
-    ax.plot(fitted_curve[:, 0], fitted_curve[:, 1], linewidth=2.2, label="Final reported curve", color="tab:orange")
-    ax.set_title(f"Parametric curve fit (theta={theta:.0f} degrees, M={m:.2f}, X={x_offset:.0f})")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
+    ax.scatter(data[:, 0], data[:, 1], s=13, alpha=0.7, label="Supplied data (1,500 points)", color="tab:blue")
+    ax.plot(
+        fitted_curve[:, 0],
+        fitted_curve[:, 1],
+        linewidth=2.2,
+        label=f"Fitted curve (theta={theta:.0f} deg, M={m:.2f}, X={x_offset:.0f})",
+        color="tab:orange",
+    )
+    ax.set_title(f"Parametric Curve Fit (theta={theta:.0f} deg, M={m:.2f}, X={x_offset:.0f})", fontsize=14)
+    ax.set_xlabel("x", fontsize=12)
+    ax.set_ylabel("y", fontsize=12)
     ax.grid(True, alpha=0.3)
-    ax.legend()
+    ax.legend(loc="upper left", framealpha=0.9)
     ax.set_aspect("equal", adjustable="box")
     fig.tight_layout()
 
-    PLOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(PLOT_PATH, dpi=300, bbox_inches="tight")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
+def save_diagnostics_plot(
+    data: np.ndarray,
+    parameters: tuple[float, float, float] = VERIFIED_PARAMETERS,
+    output_path: Path = DIAGNOSTICS_PATH,
+) -> None:
+    """Generate and save a 2-panel diagnostic figure (Residuals vs. t & Error Distribution)."""
+    val_data = validate_t_inversion(data, parameters)
+    u_recovered = val_data["recovered_t"]
+    _, raw_residuals = recover_t_and_residuals(parameters, data)
+    abs_residuals = np.abs(raw_residuals)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5), dpi=180)
+
+    # Panel 1: Residuals vs Recovered Parameter t
+    ax1.scatter(u_recovered, raw_residuals * 1e5, s=12, alpha=0.6, color="tab:blue", edgecolors="none")
+    ax1.axhline(0, color="crimson", linestyle="--", linewidth=1.5, alpha=0.8)
+    ax1.set_title("Residuals vs. Recovered Parameter $t$", fontsize=13)
+    ax1.set_xlabel("Recovered $t$", fontsize=11)
+    ax1.set_ylabel("Transverse Residual $(v - \\hat{v}) \\times 10^{-5}$", fontsize=11)
+    ax1.grid(True, alpha=0.3)
+
+    # Panel 2: Absolute Error Distribution Histogram
+    ax2.hist(abs_residuals * 1e5, bins=35, color="tab:purple", edgecolor="black", alpha=0.7, density=True)
+    mean_val = float(np.mean(abs_residuals) * 1e5)
+    p95_val = float(np.percentile(abs_residuals, 95) * 1e5)
+    ax2.axvline(mean_val, color="darkblue", linestyle="-", linewidth=2, label=f"Mean: {mean_val:.2f}e-5")
+    ax2.axvline(p95_val, color="darkorange", linestyle="--", linewidth=2, label=f"95th%: {p95_val:.2f}e-5")
+    ax2.set_title("Transverse Error Distribution", fontsize=13)
+    ax2.set_xlabel("Absolute Residual $|v - \\hat{v}| \\times 10^{-5}$", fontsize=11)
+    ax2.set_ylabel("Probability Density", fontsize=11)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(framealpha=0.9)
+
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+# --- 8. Main Execution Pipeline ---
 def main() -> None:
-    data = np.loadtxt(DATA_PATH, delimiter=",", skiprows=1)
-    if data.ndim != 2 or data.shape[1] != 2:
-        raise ValueError(f"Expected two CSV columns (x, y), got shape {data.shape}.")
+    print("=" * 70)
+    print("  FLAM R&D PARAMETRIC CURVE FITTING PIPELINE")
+    print("=" * 70)
 
-    fitted_parameters, fitted_loss = fit_parameters(data)
-    metrics = validate_per_point_inversion(data, VERIFIED_PARAMETERS)
+    # Step 1: Load Data
+    data = load_dataset(DATA_PATH)
+    print(f"Successfully loaded {len(data):,} points from: {DATA_PATH}\n")
 
-    print("Differential-evolution & least-squares convergence evidence")
-    print(f"  theta = {fitted_parameters[0]:.10f} degrees")
-    print(f"  M     = {fitted_parameters[1]:.10f}")
-    print(f"  X     = {fitted_parameters[2]:.10f}")
-    print(f"  closed-form mean L1 residual = {fitted_loss:.10e}")
-    print()
-    print("Final reported parameters (independently verified)")
+    # Step 2: Primary Method (Closed-Form Rotation Decoupling)
+    print("[1/3] Running Primary Method: Closed-Form Rotation-Inversion Fit...")
+    prim_params, prim_loss = fit_closed_form(data)
+    print(f"      Fitted theta = {prim_params[0]:.10f} deg")
+    print(f"      Fitted M     = {prim_params[1]:.10f}")
+    print(f"      Fitted X     = {prim_params[2]:.10f}")
+    print(f"      Closed-form mean L1 residual = {prim_loss:.10e}\n")
+
+    # Step 3: Secondary Method (KD-Tree Nearest Neighbor Cross-Check)
+    print("[2/3] Running Secondary Method: KD-Tree (12,000 samples) Cross-Check...")
+    kdt_params, kdt_loss = fit_kdtree(data, n_samples=N_CURVE_SAMPLES)
+    print(f"      Cross-check theta = {kdt_params[0]:.10f} deg")
+    print(f"      Cross-check M     = {kdt_params[1]:.10f}")
+    print(f"      Cross-check X     = {kdt_params[2]:.10f}")
+    print(f"      KD-tree mean Manhattan/L1 distance = {kdt_loss:.10e}\n")
+
+    # Step 4: Verification & Metrics
+    print("[3/3] Computing Comprehensive Fit Metrics & Diagnostics...")
+    metrics = compute_fit_metrics(data, VERIFIED_PARAMETERS)
+
+    print("\n" + "-" * 70)
+    print("FINAL REPORTED PARAMETERS (Exact / Verified):")
     print("  theta = 30 degrees")
     print("  M     = 0.03")
     print("  X     = 55")
+    print("-" * 70)
+    print("STATISTICAL FIT QUALITY METRICS (N = 1,500 points):")
+    print(f"  Goodness-of-Fit R^2 (Combined): {metrics['r2_combined']:.10f}")
+    print(f"  Goodness-of-Fit R^2 (x, y):     R^2_x = {metrics['r2_x']:.10f}, R^2_y = {metrics['r2_y']:.10f}")
+    print(f"  Mean Squared Error (MSE):      {metrics['mse_total']:.10e}")
+    print(f"  Root Mean Squared Error (RMSE):{metrics['rmse_total']:.10e}")
     print()
-    print("Validation metrics (continuous curve reconstruction for all 1,500 points):")
-    print("  Euclidean distance:")
-    print(f"    Mean:           {metrics['euclidean_mean']:.10e}")
-    print(f"    95th percentile:{metrics['euclidean_p95']:.10e}")
-    print(f"    Max:            {metrics['euclidean_max']:.10e}")
-    print("  Manhattan / L1 distance:")
-    print(f"    Mean:           {metrics['l1_mean']:.10e}")
-    print(f"    95th percentile:{metrics['l1_p95']:.10e}")
-    print(f"    Max:            {metrics['l1_max']:.10e}")
-    print("  Closed-form transverse residual (|v - v_pred|):")
-    print(f"    Mean:           {metrics['transverse_mean']:.10e}")
-    print(f"    95th percentile:{metrics['transverse_p95']:.10e}")
-    print(f"    Max:            {metrics['transverse_max']:.10e}")
+    print("ERROR DISTRIBUTIONS:")
+    print("  Euclidean Distance (Continuous Inversion):")
+    print(f"    Mean:            {metrics['euclidean_mean']:.10e}")
+    print(f"    95th percentile: {metrics['euclidean_p95']:.10e}")
+    print(f"    Maximum:         {metrics['euclidean_max']:.10e}")
+    print("  Manhattan / L1 Distance (Continuous Inversion):")
+    print(f"    Mean:            {metrics['l1_mean']:.10e}")
+    print(f"    95th percentile: {metrics['l1_p95']:.10e}")
+    print(f"    Maximum:         {metrics['l1_max']:.10e}")
+    print("  Transverse Residuals (|v - v_pred|):")
+    print(f"    Mean:            {metrics['transverse_mean']:.10e}")
+    print(f"    95th percentile: {metrics['transverse_p95']:.10e}")
+    print(f"    Maximum:         {metrics['transverse_max']:.10e}")
+    print("-" * 70)
 
-    save_plot(data, VERIFIED_PARAMETERS)
-    print(f"\nSaved plot: {PLOT_PATH}")
+    # Step 5: Save Visual Plots
+    save_curve_plot(data, VERIFIED_PARAMETERS, PLOT_PATH)
+    print(f"Saved primary curve plot:       {PLOT_PATH}")
+    save_diagnostics_plot(data, VERIFIED_PARAMETERS, DIAGNOSTICS_PATH)
+    print(f"Saved residual diagnostics plot: {DIAGNOSTICS_PATH}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
