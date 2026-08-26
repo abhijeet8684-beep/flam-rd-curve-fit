@@ -221,7 +221,43 @@ Per the assignment brief requirements, the exact LaTeX parametric equation for $
 
 ---
 
-## 9. Setup & Execution Instructions
+## 9. Repository Structure
+
+```text
+flam-rd-curve-fit/
+├── data/
+│   ├── xy_data.csv               # 1,500 unordered (x, y) input coordinates
+│   └── assignment_brief.pdf      # Original assignment problem statement & criteria
+├── results/
+│   ├── curve_fit.png             # Primary plot: data points overlaid with fitted curve
+│   └── diagnostics.png           # 2-panel diagnostic: residuals vs t & error histogram
+├── screenshots/
+│   └── desmos_curve.png          # Verified Desmos interactive calculator screenshot
+├── src/
+│   └── fit_curve.py              # Complete modular fitting, validation & plotting pipeline
+├── .gitignore                    # Python cache and virtual environment ignores
+├── README.md                     # Comprehensive technical documentation & analysis
+└── requirements.txt              # Project dependencies (numpy, scipy, matplotlib)
+```
+
+### Module Responsibilities (`src/fit_curve.py`)
+
+The codebase follows strict separation of concerns across functional blocks:
+
+| Component / Function | Role in Pipeline | Key Implementation Detail |
+| :--- | :--- | :--- |
+| `load_dataset()` | Input Ingestion & Integrity | File existence verification, non-empty check, CSV parsing, `(N, 2)` shape validation. |
+| `curve_at_t()` / `curve_points()` | Parametric Forward Model | Continuous evaluation for scalar/vector $t$ or dense uniform sampling ($N=12,000$). |
+| `recover_t_and_residuals()` | Core Analytical Decoupling | Applies $R(-\theta)$ to centered points to recover exact $t_i$ and transverse residual $r_i$. |
+| `fit_closed_form()` | Primary Global Fit | Differential Evolution on mean $|r_i|$ + non-linear Least-Squares local polish. |
+| `fit_kdtree()` | Secondary Cross-Validation | Global Differential Evolution using KD-Tree nearest-neighbor queries on 12k sampled curve points. |
+| `validate_t_inversion()` | Authoritative Ground-Truth Check | Independent bounded scalar minimization (`minimize_scalar`) on continuous curve. |
+| `compute_fit_metrics()` | Statistical Verification | Computes $R^2$ (Combined, $x$, $y$), MSE, RMSE, and full continuous error distributions. |
+| `save_curve_plot()` / `save_diagnostics_plot()` | Diagnostic Visualization | Exports high-DPI (300 DPI) publication-grade figures to `results/`. |
+
+---
+
+## 10. Setup & Execution Instructions
 
 ### Windows (PowerShell)
 ```powershell
