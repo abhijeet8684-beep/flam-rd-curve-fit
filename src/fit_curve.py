@@ -167,8 +167,6 @@ def closed_form_loss(parameters: np.ndarray, data: np.ndarray) -> float:
     return float(np.mean(np.abs(residuals)))
 
 
-def fit_closed_form(data: np.ndarray, seed: int = 2026) -> tuple[np.ndarray, float]:
-    """Primary Fit: Global Differential Evolution + Non-linear Least-Squares polish on closed-form residuals."""
 def fit_primary_de_rotation(data: np.ndarray, seed: int = 2026, initial_theta: float | None = None) -> tuple[np.ndarray, float]:
     """Primary Fit: Global Differential Evolution + Non-linear Least-Squares polish on closed-form residuals.
 
@@ -459,7 +457,6 @@ def main() -> None:
 
     # Step 2: Primary Method (Closed-Form Rotation Decoupling)
     print("[1/4] Running Primary Method: Closed-Form Rotation-Inversion Fit...")
-    prim_params, prim_loss = fit_closed_form(data)
     pca_theta = estimate_theta_via_pca(data)
     print(f"      PCA initial θ estimate: {pca_theta:.2f}° (sanity check)")
     prim_params, prim_loss = fit_primary_de_rotation(data, initial_theta=pca_theta)
