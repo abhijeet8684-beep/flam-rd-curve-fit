@@ -456,68 +456,65 @@ def main() -> None:
     print(f"Successfully loaded {len(data):,} points from: data/xy_data.csv\n")
 
     # Step 2: Primary Method (Closed-Form Rotation Decoupling)
-    print("[1/4] Running Primary Method: Closed-Form Rotation-Inversion Fit...")
+    print("[1/4] Running Primary Method: Closed-Form Rotation-Inversion Fit (takes a moment)...")
     pca_theta = estimate_theta_via_pca(data)
-    print(f"      PCA initial θ estimate: {pca_theta:.2f}° (sanity check)")
     prim_params, prim_loss = fit_primary_de_rotation(data, initial_theta=pca_theta)
-    print(f"      Fitted theta = {prim_params[0]:.10f} deg")
-    print(f"      Fitted M     = {prim_params[1]:.10f}")
-    print(f"      Fitted X     = {prim_params[2]:.10f}")
-    print(f"      Closed-form mean L1 residual = {prim_loss:.10e}\n")
 
     # Step 3: Multi-Start Robustness Check
     print("[2/4] Running Multi-Start Robustness Check (6 diverse parameter regions)...")
     multistart_results = run_multistart_robustness_check(data)
-    print(f"      {'Initial Guess (theta, M, X)':<28} | {'Fitted (theta, M, X)':<28} | {'Loss':<11} | Status")
-    print("      " + "-" * 80)
-    for res in multistart_results:
-        init_s = f"({res['initial'][0]:.1f} deg, {res['initial'][1]:.2f}, {res['initial'][2]:.1f})"
-        fit_s = f"({res['fitted'][0]:.2f} deg, {res['fitted'][1]:.4f}, {res['fitted'][2]:.2f})"
-        status = "GLOBAL OPTIMUM" if res["is_global"] else "Local Trap"
-        print(f"      {init_s:<28} | {fit_s:<28} | {res['loss']:<11.4e} | {status}")
-    print()
 
     # Step 4: Secondary Method (KD-Tree Nearest Neighbor Cross-Check)
-    print("[3/4] Running Secondary Method: KD-Tree (12,000 samples) Cross-Check...")
+    print("[3/4] Running Secondary Method: KD-Tree (12,000 samples) Cross-Check (takes a moment)...")
     kdt_params, kdt_loss = fit_kdtree(data, n_samples=N_CURVE_SAMPLES)
-    print(f"      Cross-check theta = {kdt_params[0]:.10f} deg")
-    print(f"      Cross-check M     = {kdt_params[1]:.10f}")
-    print(f"      Cross-check X     = {kdt_params[2]:.10f}")
-    print(f"      KD-tree mean Manhattan/L1 distance = {kdt_loss:.10e}\n")
 
     # Step 5: Verification & Comprehensive Metrics
     print("[4/4] Computing Comprehensive Fit Metrics & Diagnostics...")
     metrics = compute_fit_metrics(data, prim_params, VERIFIED_PARAMETERS)
 
     print("\n" + "=" * 75)
+    print(f">>> HEADLINE ACCURACY METRIC: mean Euclidean t-inversion distance = {metrics['euclidean_mean']:.6e}")
+    print("=" * 75)
+    
     print("FINAL REPORTED PARAMETERS (Exact / Verified):")
     print("  theta = 30 degrees")
     print("  M     = 0.03")
     print("  X     = 55")
-    print("=" * 75)
-    print("OFFICIAL ASSIGNMENT SCORING METRIC:")
-    print(f"  Uniform-Sampled L1 Distance (Expected vs. Fitted): {metrics['uniform_sample_l1_distance']:.10e}")
-    print(f"  Data Point Continuous L1 Reconstruction Distance:  {metrics['l1_mean']:.10e}")
-    print("-" * 75)
-    print("STATISTICAL FIT QUALITY SUITE (N = 1,500 points):")
-    print(f"  Goodness-of-Fit R^2 (Combined):  {metrics['r2_combined']:.10f}")
-    print(f"  Goodness-of-Fit R^2 (x, y):      R^2_x = {metrics['r2_x']:.10f}, R^2_y = {metrics['r2_y']:.10f}")
-    print(f"  Mean Squared Error (MSE):       {metrics['mse_total']:.10e}")
-    print(f"  Root Mean Squared Error (RMSE): {metrics['rmse_total']:.10e}")
-    print()
-    print("CONTINUOUS ERROR DISTRIBUTIONS:")
-    print("  Euclidean Distance (Continuous Inversion):")
-    print(f"    Mean:            {metrics['euclidean_mean']:.10e}")
-    print(f"    95th percentile: {metrics['euclidean_p95']:.10e}")
-    print(f"    Maximum:         {metrics['euclidean_max']:.10e}")
-    print("  Manhattan / L1 Distance (Continuous Inversion):")
-    print(f"    Mean:            {metrics['l1_mean']:.10e}")
-    print(f"    95th percentile: {metrics['l1_p95']:.10e}")
-    print(f"    Maximum:         {metrics['l1_max']:.10e}")
-    print("  Transverse Residuals (|v - v_pred|):")
-    print(f"    Mean:            {metrics['transverse_mean']:.10e}")
-    print(f"    95th percentile: {metrics['transverse_p95']:.10e}")
-    print(f"    Maximum:         {metrics['transverse_max']:.10e}")
+    
+    print("\n--- Secondary diagnostics (not the accuracy claim) ---")
+    
+    print("1. Search Objectives & Method Consensus:")
+    print(f"   PCA initial theta estimate: {pca_theta:.2f} deg")
+    print(f"   Primary DE convergence loss (mean |residual|): {prim_loss:.6e}")
+    print(f"   Primary Fitted (theta, M, X): ({prim_params[0]:.6f}, {prim_params[1]:.6f}, {prim_params[2]:.6f})")
+    print(f"   KD-tree nearest-neighbour Manhattan loss: {kdt_loss:.6e}")
+    print(f"   KD-tree Fitted (theta, M, X): ({kdt_params[0]:.6f}, {kdt_params[1]:.6f}, {kdt_params[2]:.6f})")
+    print(f"   Uniform-sampled L1 (expected vs fitted): {metrics['uniform_sample_l1_distance']:.6e}")
+    
+    print("\n2. Multi-Start Robustness Check (6 diverse parameter regions):")
+    print(f"   {'Initial Guess (theta, M, X)':<28} | {'Fitted (theta, M, X)':<28} | {'Loss':<11} | Status")
+    print("   " + "-" * 80)
+    for res in multistart_results:
+        init_s = f"({res['initial'][0]:.1f} deg, {res['initial'][1]:.2f}, {res['initial'][2]:.1f})"
+        fit_s = f"({res['fitted'][0]:.2f} deg, {res['fitted'][1]:.4f}, {res['fitted'][2]:.2f})"
+        status = "GLOBAL OPTIMUM" if res["is_global"] else "Local Trap"
+        print(f"   {init_s:<28} | {fit_s:<28} | {res['loss']:<11.4e} | {status}")
+        
+    print("\n3. Additional Statistical Fit Quality Suite (N = 1,500 points):")
+    print(f"   Goodness-of-Fit R^2 (Combined):  {metrics['r2_combined']:.10f}")
+    print(f"   Goodness-of-Fit R^2 (x, y):      R^2_x = {metrics['r2_x']:.10f}, R^2_y = {metrics['r2_y']:.10f}")
+    print(f"   Mean Squared Error (MSE):       {metrics['mse_total']:.10e}")
+    print(f"   Root Mean Squared Error (RMSE): {metrics['rmse_total']:.10e}")
+    
+    print("\n4. Additional Continuous Error Distributions:")
+    print(f"   95th percentile Euclidean:      {metrics['euclidean_p95']:.10e}")
+    print(f"   Maximum Euclidean:              {metrics['euclidean_max']:.10e}")
+    print(f"   Mean Manhattan / L1:            {metrics['l1_mean']:.10e}")
+    print(f"   95th percentile L1:             {metrics['l1_p95']:.10e}")
+    print(f"   Maximum L1:                     {metrics['l1_max']:.10e}")
+    print(f"   Mean Transverse |v - v_pred|:   {metrics['transverse_mean']:.10e}")
+    print(f"   95th percentile Transverse:     {metrics['transverse_p95']:.10e}")
+    print(f"   Maximum Transverse:             {metrics['transverse_max']:.10e}")
     print("-" * 75)
 
     # Step 6: Save Visual Plots
