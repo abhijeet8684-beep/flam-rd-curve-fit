@@ -98,7 +98,7 @@ def estimate_theta_via_pca(data: np.ndarray) -> float:
     # Covariance matrix (2x2)
     cov = np.cov(centered, rowvar=False)
     # Eigen decomposition
-    eig_vals, eig_vecs = np.linalg.eig(cov)
+    eig_vals, eig_vecs = np.linalg.eigh(cov)
     # Choose eigenvector with largest eigenvalue
     principal = eig_vecs[:, np.argmax(eig_vals)]
     # Compute angle in radians and convert to degrees

@@ -2,9 +2,13 @@
 
 > **Headline result** — **θ = 30°, M = 0.03, X = 55**  
 > **Headline accuracy metric**: mean Euclidean distance (per-point, continuous t-inversion) ≈ **1.26 × 10⁻⁵**  
-> R² = 1.0000000000
+> R² = 1.0000000000 *(expected for closed-form recovery of a deterministic, noise-free curve; not overfitting)*
 
 ---
+
+## Contents
+
+[Problem](#problem) · [Approach](#approach) · [Method](#method) · [Validation](#validation) · [Visual Check](#visual-check) · [Interactive Explorer](#interactive-explorer) · [Results](#results) · [Repository Structure](#repository-structure) · [Setup](#setup--execution)
 
 ## Problem
 
@@ -93,6 +97,12 @@ Opens a matplotlib window with sliders for θ (0–50°), M (−0.05–0.05), an
 
 No extra dependencies — uses only `numpy` and `matplotlib`.
 
+### Interactive Explorer
+
+[**Try it live in your browser (no install needed) →**](docs/interactive_explorer.html)
+
+Open `docs/interactive_explorer.html` directly in a modern browser. It embeds the supplied data and provides the same bounded theta, M, and X controls as the local slider tool.
+
 ### Static plots
 
 ![Fitted curve vs data](results/curve_fit.png)
@@ -101,11 +111,19 @@ No extra dependencies — uses only `numpy` and `matplotlib`.
 ![Residual diagnostics](results/diagnostics.png)
 *Left: transverse residuals vs recovered t — zero drift across the domain. Right: error histogram, all errors < 4.1 × 10⁻⁵.*
 
+### Convergence at a glance
+
+![Four stages from a multi-start seed to the final curve](results/convergence_stages.png)
+*A successful multi-start seed moving toward the reported parameters; the supplied data remains fixed in every panel.*
+
+![Method consensus and multi-start outcomes](results/method_comparison.png)
+*All outcomes are compared using the same mean absolute transverse residual; the logarithmic scale makes the global basin and local traps visible together.*
+
 ### Desmos interactive graph
 
 [**Open in Desmos →**](https://www.desmos.com/calculator/evnyyb7znw)
 
-The Desmos graph encodes:
+**Human-readable reference (do not paste):**
 
 ```
 (t·cos(0.5236) − e^(0.03·|t|)·sin(0.3t)·sin(0.5236) + 55,
@@ -117,7 +135,7 @@ The Desmos graph encodes:
 > [!NOTE]
 > **Desmos verification status**: manually verified 2026-08-26. The saved graph renders the continuous curve over {6 ≤ t ≤ 60} without warnings. Re-verify before submission — pasting into Desmos can sometimes strip curly-brace domain constraints.
 
-**Copy-paste LaTeX for Desmos:**
+**Paste this exact block into Desmos:**
 ```latex
 \left(t\cos(0.5236)-e^{0.03\left|t\right|}\sin(0.3t)\sin(0.5236)+55,\ 42+t\sin(0.5236)+e^{0.03\left|t\right|}\sin(0.3t)\cos(0.5236)\right)
 ```
@@ -175,7 +193,13 @@ flam-rd-curve-fit/
 │   └── assignment_brief.pdf    # Original assignment problem statement
 ├── results/
 │   ├── curve_fit.png           # Curve overlay plot (auto-generated)
-│   └── diagnostics.png         # 2-panel residuals & error histogram
+│   ├── diagnostics.png         # 2-panel residuals & error histogram
+│   ├── convergence_stages.png  # 4-stage convergence visual
+│   └── method_comparison.png   # Method and multi-start comparison
+├── docs/
+│   └── interactive_explorer.html # Dependency-free browser explorer
+├── scripts/
+│   └── generate_visuals.py     # Generates README visual supplements
 ├── screenshots/
 │   └── desmos_curve.png        # Desmos screenshot (manual verification)
 ├── src/
@@ -191,12 +215,18 @@ flam-rd-curve-fit/
 |:---|:---|
 | `load_dataset()` | Load & validate the CSV |
 | `estimate_theta_via_pca()` | PCA coarse θ guess from data's principal axis |
+| `curve_at_t()` | Evaluate the continuous parametric curve |
+| `curve_points()` | Create a dense uniform curve sampling |
 | `recover_t_and_residuals()` | Closed-form R⁻¹ — recovers exact t per point |
+| `closed_form_loss()` | Mean absolute transverse-residual objective |
 | `fit_primary_de_rotation()` | Primary fit: DE global + LS polish |
 | `run_multistart_robustness_check()` | 6-start basin verification |
+| `kdtree_manhattan_loss()` | Secondary sampled Manhattan objective |
 | `fit_kdtree()` | Secondary KD-tree cross-check |
 | `validate_t_inversion()` | Per-point continuous t-inversion (headline metric source) |
 | `compute_fit_metrics()` | Full metric suite |
+| `save_curve_plot()` | Save the data/curve overlay image |
+| `save_diagnostics_plot()` | Save residual diagnostic charts |
 
 ---
 
