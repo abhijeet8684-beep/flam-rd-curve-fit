@@ -85,6 +85,30 @@ def load_dataset(filepath: Path | str = DATA_PATH) -> np.ndarray:
 
     return data
 
+# --- 2. PCA Initial Guess for Rotation Angle ---
+def estimate_theta_via_pca(data: np.ndarray) -> float:
+    """Estimate the rotation angle θ (in degrees) using PCA on the centered data.
+
+    The dominant eigenvector of the covariance matrix of the centered points
+    approximates the direction of the curve's spine. The angle of this eigenvector
+    relative to the x‑axis provides a coarse initial guess for θ.
+    """
+    # Center the data (remove translation components)
+    centered = data - np.mean(data, axis=0)
+    # Covariance matrix (2x2)
+    cov = np.cov(centered, rowvar=False)
+    # Eigen decomposition
+    eig_vals, eig_vecs = np.linalg.eig(cov)
+    # Choose eigenvector with largest eigenvalue
+    principal = eig_vecs[:, np.argmax(eig_vals)]
+    # Compute angle in radians and convert to degrees
+    theta_rad = np.arctan2(principal[1], principal[0])
+    theta_deg = np.degrees(theta_rad)
+    # Ensure angle is within the search bounds [0, 50]
+    if theta_deg < 0:
+        theta_deg += 180
+    return theta_deg
+
 
 # --- 2. Parametric Curve Evaluation ---
 def curve_at_t(
@@ -145,6 +169,19 @@ def closed_form_loss(parameters: np.ndarray, data: np.ndarray) -> float:
 
 def fit_closed_form(data: np.ndarray, seed: int = 2026) -> tuple[np.ndarray, float]:
     """Primary Fit: Global Differential Evolution + Non-linear Least-Squares polish on closed-form residuals."""
+def fit_primary_de_rotation(data: np.ndarray, seed: int = 2026, initial_theta: float | None = None) -> tuple[np.ndarray, float]:
+    """Primary Fit: Global Differential Evolution + Non-linear Least-Squares polish on closed-form residuals.
+
+    Parameters
+    ----------
+    data: np.ndarray
+        The input point cloud.
+    seed: int, optional
+        Random seed for reproducibility of the DE optimizer.
+    initial_theta: float | None, optional
+        Optional coarse initial guess for the rotation angle θ (in degrees). If provided, it will replace the DE result's theta
+        as the starting point for the local least‑squares polish.
+    """
     de_result = differential_evolution(
         closed_form_loss,
         bounds=BOUNDS,
@@ -423,6 +460,9 @@ def main() -> None:
     # Step 2: Primary Method (Closed-Form Rotation Decoupling)
     print("[1/4] Running Primary Method: Closed-Form Rotation-Inversion Fit...")
     prim_params, prim_loss = fit_closed_form(data)
+    pca_theta = estimate_theta_via_pca(data)
+    print(f"      PCA initial θ estimate: {pca_theta:.2f}° (sanity check)")
+    prim_params, prim_loss = fit_primary_de_rotation(data, initial_theta=pca_theta)
     print(f"      Fitted theta = {prim_params[0]:.10f} deg")
     print(f"      Fitted M     = {prim_params[1]:.10f}")
     print(f"      Fitted X     = {prim_params[2]:.10f}")
