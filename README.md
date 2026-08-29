@@ -8,7 +8,7 @@
 
 ## Contents
 
-[Problem](#problem) · [Approach](#approach) · [Method](#method) · [Validation](#validation) · [Visual Check](#visual-check) · [Interactive Explorer](#interactive-explorer) · [Results](#results) · [Repository Structure](#repository-structure) · [Setup](#setup--execution)
+[Problem](#problem) · [Approach](#approach) · [Method](#method) · [Validation](#validation) · [Visual Check](#visual-check) · [Interactive Explorer](#interactive-explorer) · [Results](#results) · [Repository Structure](#repository-structure) · [Tests](#tests) · [Setup](#setup--execution)
 
 ## Problem
 
@@ -65,6 +65,7 @@ The transverse residual $r_i = v_i - e^{M|u_i|}\sin(0.3u_i)$ is then a pure scal
 1. **Global search**: `scipy.optimize.differential_evolution` (population=15, tol=1e-10)
 2. **Local polish**: `scipy.optimize.least_squares` (ftol=xtol=gtol=1e-15)
 3. **PCA warm start**: `estimate_theta_via_pca()` provides the LS initial θ from the data's principal axis
+4. **Independent global check**: `scipy.optimize.dual_annealing`, followed by the same bounded local polish, independently reaches the reported basin.
 
 ### Secondary: KD-Tree Nearest-Neighbour (cross-check only)
 
@@ -166,6 +167,7 @@ X     = 55
 | Method | Fitted θ | Fitted M | Fitted X | Convergence loss |
 |:---|:---|:---|:---|:---|
 | **Primary (closed-form + DE + LS)** | 29.9999729° | 0.02999999 | 54.9999982 | 2.56 × 10⁻⁶ |
+| **Independent (closed-form + dual annealing + LS)** | 29.9999729° | 0.02999999 | 54.9999982 | 2.56 × 10⁻⁶ |
 | **Secondary (KD-tree 12k)** | 29.9999803° | 0.02999997 | 54.9999680 | 1.70 × 10⁻³ *(nearest-neighbour, not accuracy)* |
 | **Reported** | **30°** | **0.03** | **55** | — |
 
@@ -200,13 +202,16 @@ flam-rd-curve-fit/
 │   └── interactive_explorer.html # Dependency-free browser explorer
 ├── scripts/
 │   └── generate_visuals.py     # Generates README visual supplements
+├── tests/
+│   └── test_fit_curve.py        # Formula, synthetic recovery, and regression tests
 ├── screenshots/
 │   └── desmos_curve.png        # Desmos screenshot (manual verification)
 ├── src/
 │   ├── fit_curve.py            # Full fitting pipeline (primary method, validation, metrics)
 │   └── curve_explorer.py       # Interactive slider explorer (standalone)
 ├── README.md
-└── requirements.txt            # numpy, scipy, matplotlib
+├── requirements.txt            # numpy, scipy, matplotlib
+└── requirements-dev.txt        # pytest and runtime requirements for tests
 ```
 
 ### Key functions in `fit_curve.py`
@@ -219,7 +224,9 @@ flam-rd-curve-fit/
 | `curve_points()` | Create a dense uniform curve sampling |
 | `recover_t_and_residuals()` | Closed-form R⁻¹ — recovers exact t per point |
 | `closed_form_loss()` | Mean absolute transverse-residual objective |
+| `polish_closed_form_solution()` | Shared bounded least-squares polish for global candidates |
 | `fit_primary_de_rotation()` | Primary fit: DE global + LS polish |
+| `fit_dual_annealing_rotation()` | Independent global fit: dual annealing + LS polish |
 | `run_multistart_robustness_check()` | 6-start basin verification |
 | `kdtree_manhattan_loss()` | Secondary sampled Manhattan objective |
 | `fit_kdtree()` | Secondary KD-tree cross-check |
@@ -227,6 +234,17 @@ flam-rd-curve-fit/
 | `compute_fit_metrics()` | Full metric suite |
 | `save_curve_plot()` | Save the data/curve overlay image |
 | `save_diagnostics_plot()` | Save residual diagnostic charts |
+
+---
+
+## Tests
+
+The pytest suite independently checks the curve formula against plain Python `math`, validates the 1,500-row CSV, recovers two unseen synthetic parameter sets `(12°, -0.03, 20)` and `(45°, 0.04, 90)`, and regression-checks the reported real-data result. The synthetic cases use the same closed-form differential-evolution-plus-polish fitting function as the assignment run.
+
+```powershell
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
 
 ---
 

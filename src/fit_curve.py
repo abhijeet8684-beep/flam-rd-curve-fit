@@ -24,7 +24,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.optimize import differential_evolution, least_squares, minimize_scalar
+from scipy.optimize import differential_evolution, dual_annealing, least_squares, minimize_scalar
 from scipy.spatial import cKDTree
 
 
@@ -167,7 +167,28 @@ def closed_form_loss(parameters: np.ndarray, data: np.ndarray) -> float:
     return float(np.mean(np.abs(residuals)))
 
 
-def fit_primary_de_rotation(data: np.ndarray, seed: int = 2026, initial_theta: float | None = None) -> tuple[np.ndarray, float]:
+def polish_closed_form_solution(initial_parameters: np.ndarray, data: np.ndarray) -> tuple[np.ndarray, float]:
+    """Polish a global-search candidate with bounded least squares on closed-form residuals."""
+    lower_bounds = [b[0] for b in BOUNDS]
+    upper_bounds = [b[1] for b in BOUNDS]
+
+    def residual_vector(p: np.ndarray) -> np.ndarray:
+        return recover_t_and_residuals(p, data)[1]
+
+    result = least_squares(
+        residual_vector,
+        x0=initial_parameters,
+        bounds=(lower_bounds, upper_bounds),
+        ftol=1e-15,
+        xtol=1e-15,
+        gtol=1e-15,
+    )
+    return result.x, float(np.mean(np.abs(result.fun)))
+
+
+def fit_primary_de_rotation(
+    data: np.ndarray, seed: int = 2026, initial_theta: float | None = None, maxiter: int = 300
+) -> tuple[np.ndarray, float]:
     """Primary Fit: Global Differential Evolution + Non-linear Least-Squares polish on closed-form residuals.
 
     Parameters
@@ -186,29 +207,28 @@ def fit_primary_de_rotation(data: np.ndarray, seed: int = 2026, initial_theta: f
         args=(data,),
         seed=seed,
         popsize=15,
-        maxiter=300,
+        maxiter=maxiter,
         tol=1e-10,
         updating="immediate",
         workers=1,
     )
 
-    lower_bounds = [b[0] for b in BOUNDS]
-    upper_bounds = [b[1] for b in BOUNDS]
+    return polish_closed_form_solution(de_result.x, data)
 
-    def residual_vector(p: np.ndarray) -> np.ndarray:
-        return recover_t_and_residuals(p, data)[1]
 
-    ls_result = least_squares(
-        residual_vector,
-        x0=de_result.x,
-        bounds=(lower_bounds, upper_bounds),
-        ftol=1e-15,
-        xtol=1e-15,
-        gtol=1e-15,
+def fit_dual_annealing_rotation(
+    data: np.ndarray, seed: int = 2026, maxiter: int = 300
+) -> tuple[np.ndarray, float]:
+    """Independent global fit using dual annealing, then the same local least-squares polish."""
+    result = dual_annealing(
+        closed_form_loss,
+        bounds=BOUNDS,
+        args=(data,),
+        seed=seed,
+        maxiter=maxiter,
+        no_local_search=True,
     )
-
-    final_loss = float(np.mean(np.abs(ls_result.fun)))
-    return ls_result.x, final_loss
+    return polish_closed_form_solution(result.x, data)
 
 
 # --- 4. Multi-Start Robustness Check ---
@@ -456,20 +476,24 @@ def main() -> None:
     print(f"Successfully loaded {len(data):,} points from: data/xy_data.csv\n")
 
     # Step 2: Primary Method (Closed-Form Rotation Decoupling)
-    print("[1/4] Running Primary Method: Closed-Form Rotation-Inversion Fit (takes a moment)...")
+    print("[1/5] Running Primary Method: Closed-Form Rotation-Inversion Fit (takes a moment)...")
     pca_theta = estimate_theta_via_pca(data)
     prim_params, prim_loss = fit_primary_de_rotation(data, initial_theta=pca_theta)
 
     # Step 3: Multi-Start Robustness Check
-    print("[2/4] Running Multi-Start Robustness Check (6 diverse parameter regions)...")
+    print("[2/5] Running Multi-Start Robustness Check (6 diverse parameter regions)...")
     multistart_results = run_multistart_robustness_check(data)
 
     # Step 4: Secondary Method (KD-Tree Nearest Neighbor Cross-Check)
-    print("[3/4] Running Secondary Method: KD-Tree (12,000 samples) Cross-Check (takes a moment)...")
+    print("[3/5] Running Independent Global Check: Dual Annealing (takes a moment)...")
+    annealing_params, annealing_loss = fit_dual_annealing_rotation(data)
+
+    # Step 5: Secondary Method (KD-Tree Nearest Neighbor Cross-Check)
+    print("[4/5] Running Secondary Method: KD-Tree (12,000 samples) Cross-Check (takes a moment)...")
     kdt_params, kdt_loss = fit_kdtree(data, n_samples=N_CURVE_SAMPLES)
 
     # Step 5: Verification & Comprehensive Metrics
-    print("[4/4] Computing Comprehensive Fit Metrics & Diagnostics...")
+    print("[5/5] Computing Comprehensive Fit Metrics & Diagnostics...")
     metrics = compute_fit_metrics(data, prim_params, VERIFIED_PARAMETERS)
 
     print("\n" + "=" * 75)
@@ -487,6 +511,8 @@ def main() -> None:
     print(f"   PCA initial theta estimate: {pca_theta:.2f} deg")
     print(f"   Primary DE convergence loss (mean |residual|): {prim_loss:.6e}")
     print(f"   Primary Fitted (theta, M, X): ({prim_params[0]:.6f}, {prim_params[1]:.6f}, {prim_params[2]:.6f})")
+    print(f"   Dual annealing convergence loss (mean |residual|): {annealing_loss:.6e}")
+    print(f"   Dual Annealing Fitted (theta, M, X): ({annealing_params[0]:.6f}, {annealing_params[1]:.6f}, {annealing_params[2]:.6f})")
     print(f"   KD-tree nearest-neighbour Manhattan loss: {kdt_loss:.6e}")
     print(f"   KD-tree Fitted (theta, M, X): ({kdt_params[0]:.6f}, {kdt_params[1]:.6f}, {kdt_params[2]:.6f})")
     print(f"   Uniform-sampled L1 (expected vs fitted): {metrics['uniform_sample_l1_distance']:.6e}")

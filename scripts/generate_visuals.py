@@ -20,6 +20,7 @@ from fit_curve import (  # noqa: E402
     VERIFIED_PARAMETERS,
     closed_form_loss,
     curve_points,
+    fit_dual_annealing_rotation,
     fit_kdtree,
     fit_primary_de_rotation,
     load_dataset,
@@ -55,12 +56,13 @@ def main() -> None:
 
     # Evaluate every reported optimizer outcome with the same closed-form residual.
     primary_params, _ = fit_primary_de_rotation(data)
+    annealing_params, _ = fit_dual_annealing_rotation(data)
     kdtree_params, _ = fit_kdtree(data)
     multi = run_multistart_robustness_check(data)
-    labels = ["Primary", "KD-tree"] + [f"Start {i + 1}" for i in range(len(multi))]
-    params = [primary_params, kdtree_params] + [result["fitted"] for result in multi]
+    labels = ["Primary", "Dual annealing", "KD-tree"] + [f"Start {i + 1}" for i in range(len(multi))]
+    params = [primary_params, annealing_params, kdtree_params] + [result["fitted"] for result in multi]
     losses = [closed_form_loss(np.asarray(p), data) for p in params]
-    colors = ["tab:green", "tab:purple"] + ["tab:orange" if loss > 1e-4 else "tab:blue" for loss in losses[2:]]
+    colors = ["tab:green", "#0f766e", "tab:purple"] + ["tab:orange" if loss > 1e-4 else "tab:blue" for loss in losses[3:]]
 
     fig, ax = plt.subplots(figsize=(10, 5.5), dpi=160)
     bars = ax.bar(labels, losses, color=colors)
